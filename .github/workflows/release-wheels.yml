@@ -1,0 +1,321 @@
+name: Build and publish wheels on tag
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run build & tests only (no publish)"
+        required: false
+        default: "true"
+
+jobs:
+  build-wheels:
+    name: Build abi3 wheels with cibuildwheel (Linux/macOS)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            cibw_build: "cp36-*"
+          # - os: macos-15  # TODO: temporarily disable macOS
+          #   cibw_build: "cp38-*"
+    runs-on: ${{ matrix.os }}
+    env:
+      # Build minimal set of abi3 wheels (cp36+); the project itself is configured with py_limited_api
+      CIBW_BUILD: ${{ matrix.cibw_build }}
+      # Skip musllinux variants
+      CIBW_SKIP: "*-musllinux_*"
+      # Run the project tests for each built wheel, in cibuildwheel's test environment
+      CIBW_TEST_REQUIRES: "pytest"
+      # {project} is replaced by cibuildwheel with the path to the project checkout
+      CIBW_TEST_COMMAND: "cd {project} && pytest -q"
+      # Use bundled ssdeep C library when building wheels (Linux/macOS)
+      CIBW_ENVIRONMENT: "BUILD_LIB=1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Install autotools on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install autoconf automake libtool
+
+      - name: Build sdist (only on Linux)
+        if: runner.os == 'Linux'
+        run: |
+          python -m build --sdist --outdir dist
+
+      - name: Build wheels with cibuildwheel
+        uses: pypa/cibuildwheel@v2.23.3
+        with:
+          output-dir: dist
+
+      - name: Upload built distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-distributions-${{ matrix.os }}
+          path: dist/*
+
+  build-wheels-windows:
+    name: Build abi3 wheels with cibuildwheel (Windows)
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          # - x86  # TODO: temporarily disable x86 windows
+          - AMD64
+    env:
+      # Build minimal set of abi3 wheels (cp36+); the project itself is configured with py_limited_api
+      CIBW_BUILD: "cp36-*"
+      # Skip musllinux variants
+      CIBW_SKIP: "*-musllinux_*"
+      # Run the project tests for each built wheel, in cibuildwheel's test environment
+      CIBW_TEST_REQUIRES: "pytest"
+      # {project} is replaced by cibuildwheel with the path to the project checkout
+      CIBW_TEST_COMMAND: "cd /d {project} && pytest -q {project}"
+      # Select which architecture cibuildwheel builds for on Windows in this matrix row
+      CIBW_ARCHS_WINDOWS: ${{ matrix.arch }}
+    steps:
+      # CRLF conversion will change content of tests/files/file.txt and break tests
+      - name: Disable CRLF conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Set up MSYS2 (MINGW)
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-i686-gcc
+            mingw-w64-i686-make
+            mingw-w64-i686-pkgconf
+            autoconf
+            automake
+            libtool
+            make
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build ssdeep libraries (Windows/MSYS2)
+        shell: msys2 {0}
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE/src/ssdeep-lib"
+
+          make distclean || true
+          autoreconf --force --install
+
+          if [ "$ARCH" = "x86" ]; then
+            HOST=i686-w64-mingw32
+          else
+            HOST=x86_64-w64-mingw32
+          fi
+
+          ./configure --host=$HOST CFLAGS="-O2" CXXFLAGS="-O2"
+          make
+          make dll
+
+          mkdir -p "$GITHUB_WORKSPACE/prebuilt/include"
+          mkdir -p "$GITHUB_WORKSPACE/prebuilt/lib"
+          cp fuzzy.h "$GITHUB_WORKSPACE/prebuilt/include/"
+          cp fuzzy.dll "$GITHUB_WORKSPACE/prebuilt/lib/"
+          cp fuzzy.def "$GITHUB_WORKSPACE/prebuilt/lib/"
+
+      - name: Create MSVC import library
+        shell: pwsh
+        run: |
+          $arch = "${{ matrix.arch }}"
+          if ($arch -eq "x86") {
+            $machine = "X86"
+            $vcArch = "x86"
+          }
+          else {
+            $machine = "X64"
+            $vcArch = "x64"
+          }
+
+          $vswhere = Join-Path ${Env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            throw "vswhere.exe not found at $vswhere"
+          }
+
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) {
+            throw "No suitable Visual Studio installation found."
+          }
+
+          $vcvars = Join-Path $vsPath "VC/Auxiliary/Build/vcvarsall.bat"
+          if (-not (Test-Path $vcvars)) {
+            throw "vcvarsall.bat not found at $vcvars"
+          }
+
+          $cmd = "`"$vcvars`" $vcArch && lib /def:prebuilt\lib\fuzzy.def /machine:$machine /out:prebuilt\lib\fuzzy.lib"
+          cmd /c $cmd
+
+      - name: Build wheels with cibuildwheel
+        uses: pypa/cibuildwheel@v2.23.3
+        env:
+          CIBW_ENVIRONMENT_WINDOWS: >-
+            BUILD_LIB=0
+            INCLUDE="{project}\\..\\prebuilt\\include;%INCLUDE%"
+            LIB="{project}\\..\\prebuilt\\lib;%LIB%"
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
+            python -m pip install --upgrade delvewheel &&
+            python -m delvewheel repair {wheel} -w {dest_dir} --add-path "{project}\\..\\prebuilt\\lib"
+        with:
+          output-dir: dist
+
+      - name: Upload built distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-distributions-windows-${{ matrix.arch }}
+          path: dist/*
+
+  test-wheels:
+    name: Test abi3 wheels across CPython versions
+    needs: [build-wheels, build-wheels-windows]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # os: [ubuntu-24.04, macos-15, windows-2025]
+        os: [ubuntu-24.04, windows-2025]  # TODO: temporarily disable macOS
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      # CRLF conversion will change content of tests/files/file.txt and break tests
+      - name: Disable CRLF conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: built-distributions-*
+          path: dist
+          merge-multiple: true
+
+      - name: Install wheel and test
+        shell: "python"
+        run: |
+          import sys, subprocess
+
+          # Upgrade pip
+          subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+
+          # Install the package itself strictly from local dist, without pulling deps
+          subprocess.check_call([
+              sys.executable,
+              "-m",
+              "pip",
+              "install",
+              "--no-index",
+              "--find-links=dist",
+              "--no-deps",
+              "ssdeep-wheel",
+          ])
+
+          # Install runtime dependencies (plus pytest) based on wheel metadata, from PyPI.
+          try:
+              from importlib.metadata import distribution, PackageNotFoundError
+          except ImportError:  # Python < 3.8
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "importlib_metadata"])
+              from importlib_metadata import distribution, PackageNotFoundError
+
+          dist = None
+          for name in ("ssdeep-wheel", "ssdeep_wheel", "ssdeep"):
+              try:
+                  dist = distribution(name)
+                  break
+              except PackageNotFoundError:
+                  dist = None
+          if dist is None:
+              raise SystemExit("Could not find installed distribution for ssdeep-wheel")
+
+          requires = [str(r) for r in (dist.requires or [])]
+          cmd = [sys.executable, "-m", "pip", "install"]
+          if requires:
+              cmd.extend(requires)
+          cmd.append("pytest")
+          subprocess.check_call(cmd)
+
+          # Finally run tests via pytest
+          subprocess.check_call([sys.executable, "-m", "pytest", "-q"])
+
+  publish:
+    name: Publish to GitHub Releases and PyPI
+    needs: [build-wheels, build-wheels-windows, test-wheels]
+    runs-on: ubuntu-24.04
+    # Triggered either by a published GitHub Release, or manually via workflow_dispatch with dry_run != 'true'
+    if: >
+      (
+        github.event_name == 'release' &&
+        github.event.action == 'published' &&
+        startsWith(github.ref, 'refs/tags/v') &&
+        !contains(github.ref, '-test')
+      ) || (
+        github.event_name == 'workflow_dispatch' &&
+        inputs.dry_run != 'true'
+      )
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: built-distributions-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload assets to existing GitHub Release
+        if: github.event_name == 'release' && github.event.action == 'published'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to PyPI (Trusted Publisher)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages_dir: dist
