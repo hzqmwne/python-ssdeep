@@ -1,0 +1,143 @@
+name: Build and publish wheels on tag
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run build & tests only (no publish)"
+        required: false
+        default: "true"
+
+jobs:
+  build-wheels:
+    name: Build abi3 wheels with cibuildwheel
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Build minimal set of abi3 wheels (cp36+); the project itself is configured with py_limited_api
+      CIBW_BUILD: "cp36-*"
+      # Skip musllinux variants, but keep 32-bit wheels enabled
+      CIBW_SKIP: "*-musllinux_*"
+      # Run the project tests for each built wheel, in cibuildwheel's test environment
+      CIBW_TEST_REQUIRES: "pytest"
+      CIBW_TEST_COMMAND: "pytest -q"
+      # Use bundled ssdeep C library when building wheels
+      CIBW_ENVIRONMENT: "BUILD_LIB=1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build sdist (only on Linux)
+        if: runner.os == 'Linux'
+        run: |
+          python -m build --sdist --outdir dist
+
+      - name: Build wheels with cibuildwheel
+        uses: pypa/cibuildwheel@v2
+        with:
+          output-dir: dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-distributions-${{ matrix.os }}
+          path: dist/*
+
+  test-wheels:
+    name: Test abi3 wheels across CPython versions
+    needs: build-wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.6", "3.7", "3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download built artifacts for this OS
+        uses: actions/download-artifact@v4
+        with:
+          name: built-distributions-${{ matrix.os }}
+          path: dist
+
+      - name: Install wheel and test
+        run: |
+          python -m pip install --upgrade pip
+          # Install the package itself strictly from local dist, without pulling deps
+          python -m pip install --no-index --find-links=dist --no-deps ssdeep-wheel
+          # Install runtime dependencies (plus pytest) based on wheel metadata, from PyPI
+          python - << 'PY'
+          import pkg_resources, subprocess, sys
+          dist = pkg_resources.get_distribution("ssdeep-wheel")
+          requires = [str(r) for r in dist.requires()]
+          cmd = [sys.executable, "-m", "pip", "install"]
+          if requires:
+              cmd.extend(requires)
+          cmd.append("pytest")
+          subprocess.check_call(cmd)
+          PY
+          pytest -q
+
+  publish:
+    name: Publish to GitHub Releases and PyPI
+    needs: [build-wheels, test-wheels]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-test') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: built-distributions-ubuntu-latest
+          path: dist
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: built-distributions-macos-latest
+          path: dist
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: built-distributions-windows-latest
+          path: dist
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to PyPI (Trusted Publisher)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages_dir: dist
