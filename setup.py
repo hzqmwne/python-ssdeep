@@ -203,6 +203,7 @@ setup(
     packages=[
         "ssdeep"
     ],
+    package_data={"ssdeep": ["py.typed"]},
     include_package_data=True,
     cffi_modules=["src/ssdeep/_build.py:ffi"],
     package_dir={"": "src"},
