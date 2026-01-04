@@ -156,13 +156,16 @@ else:
 
 
 setup(
-    name=about["__title__"],
+    name="ssdeep-wheel",
     version=about["__version__"],
 
     description=about["__summary__"],
     long_description=long_description,
     license=about["__license__"],
-    url=about["__uri__"],
+    url="https://github.com/hzqmwne/python-ssdeep",
+    project_urls={
+        "Upstream": about["__uri__"],
+    },
 
     zip_safe=False,
     author=about["__author__"],
@@ -177,6 +180,10 @@ setup(
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Programming Language :: Python :: Implementation :: CPython",
         "Programming Language :: Python :: Implementation :: PyPy",
         "Topic :: Software Development :: Libraries :: Python Modules",
