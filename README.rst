@@ -1,6 +1,22 @@
 ssdeep Python Wrapper
 =====================
 
+.. note::
+
+   This repository is an **unofficial fork** of the upstream `python-ssdeep` project. It is maintained to
+   publish an additional PyPI distribution under the name ``ssdeep-wheel`` and to provide prebuilt
+   ``abi3`` wheels for CPython 3.6+ (so that most users do not need a local C toolchain or the
+   ``ssdeep`` C library installed).
+
+   To install this fork from PyPI, use:
+
+   .. code-block:: console
+
+      $ pip install ssdeep-wheel
+
+   The original project, documentation, and design remain owned and controlled by the upstream authors;
+   this repository only repackages their work and may apply minor packaging tweaks.
+
 This is a straightforward Python wrapper for `ssdeep by Jesse Kornblum`_, which is a library for computing context
 triggered piecewise hashes (CTPH). Also called fuzzy hashes, CTPH can match inputs that have homologies. Such inputs
 have sequences of identical bytes in the same order, although bytes in between these sequences may be different in both
