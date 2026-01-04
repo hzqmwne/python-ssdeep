@@ -3,6 +3,6 @@
 requires = [
     "setuptools>=40.8.0",
     "wheel",
-    "cffi>=1.4.1; python_implementation != 'PyPy'",
+    "cffi>=1.12; python_implementation != 'PyPy'",  # for abi3, see https://cffi.readthedocs.io/en/stable/cdef.html
 ]
 build-backend = "setuptools.build_meta"

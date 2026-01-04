@@ -16,6 +16,8 @@ except ImportError:
     # We ignore type checking because mypy shows an import error
     from distutils.command.build_clib import build_clib as _build_clib  # type: ignore
 
+PY_LIMITED_API_TAG = f"cp{sys.version_info.major}{sys.version_info.minor}"
+
 base_dir = os.path.dirname(__file__)
 src_dir = os.path.join(base_dir, "src")
 # sys.path.insert(0, base_dir)
@@ -180,6 +182,7 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
     keywords="ssdeep",
+    python_requires=">=3.6",
     install_requires=[
         "cffi>=1.0.0",
     ],
@@ -208,4 +211,9 @@ setup(
         "build_ext": BuildExt
     },
     distclass=Distribution,
+    options=dict(
+        bdist_wheel={
+            "py_limited_api": PY_LIMITED_API_TAG,
+        },
+    )
 )
